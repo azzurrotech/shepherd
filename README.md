@@ -1,168 +1,140 @@
-Shepherd – Contextual Tag‑Feed Ad SelectorVersion: 1.0.0
-License: MIT License
-Author: Azzurro Technology Inc
-Contact: info@azzurro.tech
+Shepherd – Open‑Source Security Notice TrackerA lightweight, pure‑HTML/CSS/JavaScript web app that lets a client keep an eye on security advisories affecting the open‑source components they use.
+The tracker pulls vulnerability announcements from the Canadian Cyber Centre RSS feed (or any client‑provided RSS endpoint) and matches them against a list of projects supplied by the user.
 
 Table of Contents
 
-Overview
 Features
 Demo
-Installation
-Usage
+Installation & Running
+How It Works
+Adding Projects
 
-HTML Setup
-CSS Styling
-JavaScript Initialization
+Manual URL entry
+Popular shortcuts
+GitHub search
 
 
-Configuration Options
-Adding New Ad Providers
-Customization
-Development
+Viewing Advisories
+Refresh Button
+Custom RSS Sources
+URL‑Based Stack Persistence
+Folder Structure
+Customization & Extending
+Contributing
 License
-Support & Contributions
 
-
-Overview
-Shepherd is a lightweight, pure‑JavaScript library that renders an adjustable, horizontally‑scrollable feed of article tags and dynamically displays contextual advertisements from multiple providers (e.g., Carbon, Facebook Audience Network, Google AdSense).
-Ads are selected solely based on the keywords associated with the tags currently visible on the screen, ensuring relevance while keeping the implementation framework‑agnostic.
 
 Features
 
-Zero dependencies – works with plain HTML, CSS, and vanilla JS.
-Adjustable number of visible tags and spacing between them.
-Automatic detection of which tags are in view using IntersectionObserver.
-Provider‑agnostic ad selection logic – plug in any ad network that supports keyword targeting.
-Simple API for initialization and runtime configuration changes.
-MIT‑licensed – free for commercial and private use.
+Zero‑dependency – only static HTML, CSS, and vanilla JavaScript. No build tools or server required.
+Project stack stored in the URL (?stack=) – shareable links that recreate the exact list of tracked projects.
+Add projects from any URL (GitHub repos, self‑hosted packages, internal services).
+Built‑in popular‑project shortcuts (React, Vue, Angular, Django, Flask, Node.js, TensorFlow, Apache Kafka).
+GitHub repository search – find a repo by keyword and add it with one click.
+Live vulnerability feed – consumes the Canadian Cyber Centre RSS feed, parses it client‑side, and filters entries that mention the selected project.
+Refresh button – forces a fresh fetch of the RSS feed for the currently selected project.
+Client‑provided RSS feeds – replace the default feed URL in script.js with any custom endpoint.
 
 
 Demo
-A minimal working example is provided in the repository:
-git clone https://github.com/azzurro-tech/shepherd.git
-cd shepherd
-open index.html   # or open the file in your favourite browser
-Scroll the tag bar left/right; the highlighted tags indicate which ones are influencing the displayed ad.
+Open index.html in a browser (or host the folder on any static web server). The UI will look like this:
+ (illustrative only)
 
-Installation
-Since Shepherd is pure JavaScript, you can either:
+Installation & Running
 
-Download the files (shepherd.js, shepherd.css) and host them alongside your site, or
-Include via CDN (once published) – e.g.:
+Clone / download the repository.
+Ensure the folder structure matches the one described below.
+Open shepherd/index.html in any modern browser (Chrome, Firefox, Edge, Safari).
+No server is required – the app runs entirely client‑side.
 
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/shepherd@1.0.0/shepherd.css">
-<script src="https://cdn.jsdelivr.net/npm/shepherd@1.0.0/shepherd.js"></script>
+If you want to serve it over HTTP (e.g., for testing CORS‑related behaviour), a simple static server works:
+# Python 3
+python -m http.server 8000 --directory shepherd
+# Then visit http://localhost:8000/
 
-Usage
-HTML Setup
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Shepherd Demo</title>
-  <link rel="stylesheet" href="shepherd.css">
-</head>
-<body>
+How It Works
 
-  <!-- Tag feed container -->
-  <section id="tag-feed" class="shepherd-feed"></section>
+Stack persistence – The list of project URLs is encoded in the query string (?stack=).
+RSS retrieval – When a project is selected, the app fetches the Canadian Cyber Centre RSS feed (https://www.cyber.gc.ca/rss/alerts.xml).
+Keyword matching – The project URL is reduced to a simple keyword (GitHub repo name or hostname). The feed items are filtered for that keyword in their title or description.
+Display – Matching advisories are rendered in a readable bullet list, showing title, date, link, and description.
 
-  <!-- Ad slot container -->
-  <section id="ad-slot" class="shepherd-ad"></section>
+All processing happens locally in the browser; no data is sent to a backend.
 
-  <script src="shepherd.js"></script>
-  <script>
-    Shepherd.init({
-      feedElementId: 'tag-feed',
-      adSlotId: 'ad-slot',
-      visibleTagCount: 6,
-      tagSpacingPx: 12,
-      tags: [
-        { text: 'AI',          keywords: ['artificial intelligence','machine learning'] },
-        { text: 'Privacy',     keywords: ['encryption','vpn','secure messaging'] },
-        { text: 'Travel',      keywords: ['flights','hotels','tourism'] },
-        { text: 'Finance',     keywords: ['crypto','stocks','banking'] },
-        { text: 'Health',      keywords: ['wellness','nutrition','fitness'] },
-        { text: 'Gaming',      keywords: ['esports','pc gaming','consoles'] },
-        { text: 'Education',   keywords: ['online courses','e‑learning','MOOC'] },
-        { text: 'Environment', keywords: ['climate','renewable energy','sustainability'] }
-      ]
-    });
-  </script>
-</body>
-</html>
-CSS Styling
-Copy shepherd.css into your project or embed the styles directly. The stylesheet defines the layout of the tag feed, individual tags, and the ad slot.
-JavaScript Initialization
-Call Shepherd.init() with a configuration object (see Configuration Options below). After initialization, Shepherd automatically observes tag visibility and swaps ads as the user scrolls.
+Adding Projects
+Manual URL entry
 
-Configuration Options
-OptionTypeDefaultDescriptionfeedElementIdstringrequiredID of the element that will contain the tag feed.adSlotIdstringrequiredID of the element where the selected ad will be rendered.visibleTagCountnumber5Maximum number of tags considered “visible” for ad matching.tagSpacingPxnumber12Horizontal spacing (in pixels) between tags.tagsArray<{text:string, keywords:Array<string>}>requiredList of tags with human‑readable text and associated keywords used for ad targeting.
-You can modify the visible count or spacing at runtime:
-Shepherd.updateVisibleCount(8); // now consider up to 8 tags
-Shepherd.updateSpacing(20);     // increase spacing to 20 px
+Paste a full URL (e.g., https://github.com/expressjs/express) into the Add a project field.
+Click Add. The URL appears in the Tracked projects list and is stored in the URL query string.
 
-Adding New Ad Providers
+Popular shortcuts
+Click any button under Popular projects (React, Vue, etc.) to instantly add that repository to the stack.
+GitHub search
 
-Extend the providerList array in shepherd.js with the identifier of your new provider.
-Implement the real request logic inside fetchAdFromProvider(provider, keywords). Most networks expose a JavaScript SDK or a REST endpoint that accepts an array of keywords for targeting.
-Return an object { html: '<div>…ad markup…</div>' }. Shepherd will inject the HTML directly into the ad slot.
-
-// Example addition
-const providerList = ['carbon', 'facebook', 'google', 'myNewProvider'];
-
-async function fetchAdFromProvider(provider, keywords) {
-  if (provider === 'myNewProvider') {
-    // Replace with actual SDK call
-    const response = await myNewProviderSDK.requestAd({ keywords });
-    return { html: response.adHtml };
-  }
-  // existing logic...
-}
-
-Customization
-
-Tag Appearance: Modify .shepherd-tag in the CSS to change colors, fonts, or add icons.
-Active Tag Highlight: The .active class is toggled on tags that contributed to the current ad; style it as desired.
-Ad Slot Size: Adjust the min-height in .shepherd-ad or apply your own layout constraints.
+Enter a keyword in the Search GitHub for projects box (e.g., “markdown editor”).
+Press Search – the first five matching repositories appear.
+Click Add next to a result to insert its GitHub URL into the stack.
 
 
-Development
-Clone the repo and run a local static server for quick iteration:
-git clone https://github.com/azzurro-tech/shepherd.git
-cd shepherd
-python -m http.server 8000   # or any static server of your choice
-Open http://localhost:8000 in a browser to view changes live.
+Viewing Advisories
+
+Click a project in the Tracked projects list.
+The app fetches the RSS feed (or uses the cached copy) and displays any matching advisories under Vulnerability notices.
+If no matches are found, a friendly “No advisories found” message appears.
+
+
+Refresh Button
+After selecting a project, the Refresh button becomes active. Clicking it clears the cached RSS feed for the current session and forces a fresh network request, ensuring you see the very latest advisories.
+
+Custom RSS Sources
+If a client wants to use a private or alternative feed:
+
+Open script.js.
+Locate the constant near the top:
+
+const CYBER_CENTRE_RSS = 'https://www.cyber.gc.ca/rss/alerts.xml';
+
+Replace the URL with the desired RSS endpoint (must return a standard RSS 2.0 XML document).
+Save the file – the app will now pull advisories from the new source.
+
+
+URL‑Based Stack Persistence
+The stack is encoded as a comma‑separated, URL‑encoded list:
+https://yourdomain.com/shepherd/index.html?stack=https%3A%2F%2Fgithub.com%2Freactjs%2Freact,https%3A%2F%2Fgithub.com%2Fvuejs%2Fvue
+
+
+Sharing: Copy the full URL and send it to teammates; opening it restores the exact same project list.
+Editing: Adding/removing projects automatically updates the query string without a page reload.
+
+
+Folder Structure
+shepherd/
+│
+├─ index.html   ← UI markup
+├─ style.css    ← Styling
+└─ script.js    ← All interactive logic (stack handling, RSS fetch, GitHub search)
+
+All files are static and can be placed on any web server or served locally.
+
+Customization & Extending
+
+Styling: Modify style.css to match corporate branding.
+Additional data sources: Extend loadVulnerabilities() to fetch from multiple RSS feeds and merge results.
+More project shortcuts: Add new buttons in the Popular projects section and update the HTML accordingly.
+Advanced filtering: Replace the simple substring match with regular‑expression or CVE‑ID detection for higher precision.
+
+Because the code is plain JavaScript, you can integrate any further client‑side logic without changing the overall architecture.
+
+Contributing
+
+Fork the repository.
+Create a feature branch (git checkout -b feature/my‑feature).
+Make your changes, ensuring the app still works without a server.
+Submit a Pull Request with a clear description of the enhancement or bug fix.
+
+Please keep contributions dependency‑free – avoid adding build tools or external libraries unless absolutely necessary.
 
 License
-MIT License
+This project is released under the MIT License. See the LICENSE file for details.
 
-Copyright (c) 2025 Azzurro Technology Inc
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-
-Support & Contributions
-
-Issues & Bugs: Open a GitHub issue describing the problem.
-Feature Requests: Feel free to propose enhancements via issues or pull requests.
-Contact: For questions, licensing clarifications, or partnership inquiries, email info@azzurro.tech.
-
-Thank you for using Shepherd! Happy coding.
+Enjoy tracking security notices with Shepherd – a simple, shareable, and privacy‑preserving solution for open‑source dependency monitoring.

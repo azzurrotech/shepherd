@@ -1,9 +1,59 @@
-caddy/*
-db_data/*
-!db_data/SHEPHERD.md
-wp_data/*
-!wp_data/SHEPHERD.md
-wordpress_data/*
-!wordpress_data/SHEPHERD.md
-nextcloud_data/*
-!nextcloud_data/SHEPHERD.md
+# -------------------------------------------------
+# .gitignore for the Shepherd security‑notice tracker
+# -------------------------------------------------
+
+# Operating system files
+######################
+.DS_Store          # macOS Finder metadata
+Thumbs.db          # Windows thumbnail cache
+ehthumbs.db
+Desktop.ini
+
+# IDE / Editor folders & files
+##############################
+.vscode/           # VS Code workspace settings
+.idea/             # JetBrains IDEs (IntelliJ, WebStorm, etc.)
+*.sublime-workspace
+*.sublime-project
+*.swp              # Vim swap files
+*~                 # Backup files created by many editors
+
+# Dependency directories (not used in this pure‑static project,
+# but safe to keep ignored in case a package manager is added later)
+#########################################################################
+node_modules/
+bower_components/
+jspm_packages/
+
+# Build / distribution artifacts (if you ever add a build step)
+################################################################
+dist/
+build/
+out/
+*.min.js
+*.bundle.js
+*.gz
+*.zip
+
+# Logs
+######
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment / config files containing secrets
+##############################################
+.env
+.env.*      # any other env files
+
+# Miscellaneous
+###############
+.sass-cache/
+.cache/
+coverage/
+tmp/
+temp/
+*.log
+
+# End of .gitignore
