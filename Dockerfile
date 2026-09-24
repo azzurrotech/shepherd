@@ -1,14 +1,15 @@
-FROM golang:1.20-alpine
+# shepherd — identity-less IAM, firewall, rate limiter, enhancing gateway.
+# Standard library only (go.mod has zero require lines); static, cgo-free image.
 
-WORKDIR /app
-
+FROM golang:1.20-alpine AS build
+WORKDIR /src
 COPY go.mod ./
-RUN go mod download
-
 COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/shepherd .
 
-RUN go build -o shepherd-server ./main.go
-
-EXPOSE 8081
-
-CMD ["/app/shepherd-server"]
+FROM alpine:3.19
+RUN addgroup -S shepherd && adduser -S -G shepherd shepherd
+COPY --from=build /out/shepherd /usr/local/bin/shepherd
+USER shepherd
+EXPOSE 8084
+ENTRYPOINT ["shepherd"]

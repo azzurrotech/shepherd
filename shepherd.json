@@ -1,0 +1,54 @@
+{
+  "firewall": {
+    "default_allow": true,
+    "rules": [
+      {
+        "name": "block the debug endpoint entirely",
+        "action": "deny",
+        "enabled": true,
+        "methods": ["GET"],
+        "path_glob": "/debug/**"
+      },
+      {
+        "name": "limit admin mutations to the office CIDR",
+        "action": "allow",
+        "enabled": true,
+        "methods": ["POST", "PUT", "DELETE"],
+        "path_glob": "/api/admin/**",
+        "sources": ["10.0.0.0/8"]
+      },
+      {
+        "name": "hard block a known scraper",
+        "action": "deny",
+        "enabled": true,
+        "path_glob": "/**",
+        "sources": ["198.51.100.7"]
+      }
+    ]
+  },
+  "rate": {
+    "per_minute": 120,
+    "burst": 30
+  },
+  "upstreams": [
+    {
+      "name": "orders",
+      "prefix": "orders",
+      "target": "http://localhost:9100",
+      "scopes": ["read:orders", "write:orders"],
+      "query_enrich": {
+        "uid": "sub",
+        "scopes": "scopes",
+        "tenant": "meta.tenant"
+      },
+      "max_body": 16777216
+    },
+    {
+      "name": "public-status",
+      "prefix": "status",
+      "target": "http://localhost:9101",
+      "public": true,
+      "query_enrich": { "src": "sub" }
+    }
+  ]
+}
