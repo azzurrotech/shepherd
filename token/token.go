@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -62,6 +63,18 @@ var (
 	ErrWeakSecret = errors.New("master secret too short")
 	// ErrBadBlock is returned for invalid block-issue options.
 	ErrBadBlock = errors.New("invalid block parameters")
+	// ErrRegenDisabled is returned when credential-keyed regeneration is turned
+	// off for the deployment.
+	ErrRegenDisabled = errors.New("token regeneration is disabled")
+	// ErrWidenPrivilege is returned when a regeneration request asks for a
+	// scope/role outside the deployment's regeneration profile.
+	ErrWidenPrivilege = errors.New("refusing to widen privilege")
+	// ErrItemOwned is returned when an item is already owned by another
+	// subject.
+	ErrItemOwned = errors.New("item already owned by another subject")
+	// ErrCredentials is returned when regeneration is attempted without both a
+	// username and a password.
+	ErrCredentials = errors.New("username and password required")
 )
 
 // Claims is the signed payload of a capability token. It deliberately
@@ -104,11 +117,6 @@ func (c Claims) HasRole(role string) bool {
 	return false
 }
 
-// Expired reports whether the token is past expiry at time now.
-func (c Claims) Expired(now time.Time) bool {
-	return now.Unix() >= c.ExpiresAt
-}
-
 // Valid reports whether the token is within its validity window at now.
 func (c Claims) Valid(now time.Time) bool {
 	return now.Unix() >= c.NotBefore && now.Unix() < c.ExpiresAt
@@ -128,6 +136,7 @@ type Manager struct {
 	audience string
 	ttl      time.Duration
 	magicTTL time.Duration
+	regen    *RegenProfile
 	now      func() time.Time
 }
 
@@ -361,4 +370,209 @@ func RandomID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ---------------------------------------------------------------------------
+// Token tracking — ownership without identity
+// ---------------------------------------------------------------------------
+
+// Ownership is the identity-free description of what a token tracks: the
+// opaque subject that owns the item, the capability it carries, the block it
+// belongs to and the issuance window. It contains no username and no
+// personally identifying data — a statement about a capability, not a person.
+type Ownership struct {
+	Subject   string   `json:"subject"`
+	Scopes    []string `json:"scopes,omitempty"`
+	Roles     []string `json:"roles,omitempty"`
+	Block     string   `json:"block,omitempty"`
+	TokenID   string   `json:"jti"`
+	IssuedAt  int64    `json:"issued_at"`
+	ExpiresAt int64    `json:"expires_at"`
+	// Item is the tracked item, taken from the token's Meta["item"] when the
+	// token names one; empty otherwise (the subject itself is then the tracked
+	// owner).
+	Item string `json:"item,omitempty"`
+}
+
+// OwnershipFromClaims maps verified claims to their identity-free ownership.
+func OwnershipFromClaims(c Claims) Ownership {
+	return Ownership{
+		Subject:   c.Subject,
+		Scopes:    append([]string(nil), c.Scopes...),
+		Roles:     append([]string(nil), c.Roles...),
+		Block:     c.Block,
+		TokenID:   c.ID,
+		IssuedAt:  c.IssuedAt,
+		ExpiresAt: c.ExpiresAt,
+		Item:      c.Meta["item"],
+	}
+}
+
+// Track verifies raw and returns the ownership it records. It never returns a
+// username: the subject is the opaque identifier carried by the token.
+func (m *Manager) Track(raw string) (Ownership, error) {
+	c, err := m.Verify(raw)
+	if err != nil {
+		return Ownership{}, err
+	}
+	return OwnershipFromClaims(c), nil
+}
+
+// OwnershipStore maps an item to the opaque subject that owns it. It stores
+// item -> subject, never item -> username, which is the whole point of
+// identity-free ownership. It is safe for concurrent use.
+type OwnershipStore struct {
+	mu    sync.RWMutex
+	items map[string]string
+}
+
+// NewOwnershipStore returns an empty OwnershipStore.
+func NewOwnershipStore() *OwnershipStore {
+	return &OwnershipStore{items: make(map[string]string)}
+}
+
+// Claim records subject as the owner of item. It refuses to silently steal an
+// item already owned by a different subject (returning ErrItemOwned), so a
+// token can only take ownership of an unowned item or re-claim its own.
+func (s *OwnershipStore) Claim(item, subject string) error {
+	if item == "" || subject == "" {
+		return fmt.Errorf("item and subject required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.items == nil {
+		s.items = make(map[string]string)
+	}
+	if owner, ok := s.items[item]; ok && owner != subject {
+		return fmt.Errorf("%w: %s", ErrItemOwned, item)
+	}
+	s.items[item] = subject
+	return nil
+}
+
+// Owner returns the opaque subject that owns item, if any.
+func (s *OwnershipStore) Owner(item string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	owner, ok := s.items[item]
+	return owner, ok
+}
+
+// ---------------------------------------------------------------------------
+// Credential-keyed token regeneration
+// ---------------------------------------------------------------------------
+
+// RegenDomain namespaces the credential KDF so a regenerated subject can never
+// collide with a random subject or with any other derivation.
+const RegenDomain = "shepherd:regen:v1"
+
+// RegenProfile is the deployment's regenerable capability: the exact
+// scopes/roles a credential-keyed regeneration may carry. It is the ceiling for
+// Regenerate, so regeneration can never widen privilege. A nil profile, or one
+// with Enabled false, disables the feature ("can be disabled per-deployment").
+type RegenProfile struct {
+	Enabled bool
+	Scopes  []string
+	Roles   []string
+	TTL     time.Duration
+}
+
+// WithRegenerate installs a regeneration profile. Passing nil (or Enabled
+// false) disables credential-keyed regeneration.
+func (m *Manager) WithRegenerate(p *RegenProfile) *Manager { m.regen = p; return m }
+
+// RegenOptions are the inputs to Regenerate. Username and Password are KDF
+// input only: neither is stored, embedded in the token, or returned.
+type RegenOptions struct {
+	Username string
+	Password string
+	// Scopes/Roles optionally narrow the profile. When empty the profile's
+	// full set is used. Any value outside the profile is refused with
+	// ErrWidenPrivilege.
+	Scopes   []string
+	Roles    []string
+	TTL      time.Duration
+	Audience string
+}
+
+// DeriveSubject deterministically derives the opaque subject bound to a fixed
+// credential as
+//
+//	base64url( HMAC-SHA256(master_secret, domain || \x00 || username || \x00 || password) [:16] )
+//
+// The NUL separators implement the README's "domain || username || password"
+// concatenation without the boundary ambiguity that raw concatenation would
+// allow (user "a"+pass "bc" must not equal user "ab"+pass "c"). The username is
+// KDF input only and is never stored or embedded in the token: the result is an
+// opaque identifier.
+func (m *Manager) DeriveSubject(username, password string) string {
+	seed := m.regenMAC(username, password)
+	return "gen_" + base64.RawURLEncoding.EncodeToString(seed[:16])
+}
+
+// regenMAC computes the raw HMAC-SHA256(master_secret, domain||username||password).
+func (m *Manager) regenMAC(username, password string) []byte {
+	mac := hmac.New(sha256.New, m.secret)
+	mac.Write([]byte(RegenDomain))
+	mac.Write([]byte{0})
+	mac.Write([]byte(username))
+	mac.Write([]byte{0})
+	mac.Write([]byte(password))
+	return mac.Sum(nil)
+}
+
+// Regenerate issues a fresh token whose capability is deterministically bound
+// to a fixed credential. The same username+password always reproduce the same
+// subject/scopes/roles; only the envelope (jti/iat/exp) is fresh. Nothing about
+// the credential is persisted — no username, no password, no hash of either.
+//
+// It never widens privilege: the resulting scopes/roles are always a subset of
+// the configured RegenProfile, and an explicit request outside the profile is
+// refused with ErrWidenPrivilege.
+func (m *Manager) Regenerate(o RegenOptions) (string, Claims, error) {
+	if m.regen == nil || !m.regen.Enabled {
+		return "", Claims{}, ErrRegenDisabled
+	}
+	if o.Username == "" || o.Password == "" {
+		return "", Claims{}, ErrCredentials
+	}
+	scopes, err := clampToProfile(o.Scopes, m.regen.Scopes)
+	if err != nil {
+		return "", Claims{}, err
+	}
+	roles, err := clampToProfile(o.Roles, m.regen.Roles)
+	if err != nil {
+		return "", Claims{}, err
+	}
+	ttl := o.TTL
+	if ttl == 0 {
+		ttl = m.regen.TTL
+	}
+	return m.Issue(IssueOptions{
+		Subject:  m.DeriveSubject(o.Username, o.Password),
+		Scopes:   scopes,
+		Roles:    roles,
+		TTL:      ttl,
+		Audience: o.Audience,
+	})
+}
+
+// clampToProfile returns requested when non-empty (after checking each entry is
+// permitted), otherwise the profile ceiling. A "*" ceiling permits anything.
+func clampToProfile(requested, ceiling []string) ([]string, error) {
+	if len(requested) == 0 {
+		return append([]string(nil), ceiling...), nil
+	}
+	allowed := make(map[string]bool, len(ceiling))
+	for _, c := range ceiling {
+		allowed[c] = true
+	}
+	out := make([]string, 0, len(requested))
+	for _, r := range requested {
+		if !allowed[r] && !allowed["*"] {
+			return nil, fmt.Errorf("%w: %q not in regeneration profile", ErrWidenPrivilege, r)
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }

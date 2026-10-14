@@ -47,21 +47,6 @@ func TestJSDerivedAES(t *testing.T) {
 	}
 }
 
-func TestJSRandomAES(t *testing.T) {
-	k1, err := JSRandomAES("session")
-	if err != nil {
-		t.Fatalf("JSRandomAES: %v", err)
-	}
-	k2, _ := JSRandomAES("session")
-	if k1.Key == k2.Key {
-		t.Fatalf("random keys must differ")
-	}
-	raw, _ := base64.StdEncoding.DecodeString(k1.Key)
-	if len(raw) != 32 {
-		t.Fatalf("expected 32-byte random key")
-	}
-}
-
 func TestJSHMAC(t *testing.T) {
 	master := []byte("0123456789abcdef0123456789abcdef")
 	h, err := JSHMAC(master, "chat")

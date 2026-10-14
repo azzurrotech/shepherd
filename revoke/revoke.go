@@ -84,13 +84,6 @@ func (s *Store) Cleanup() {
 	}
 }
 
-// Len reports the number of tracked entries (tests/debug only).
-func (s *Store) Len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.deny)
-}
-
 func (s *Store) add(key string, expiresAt int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

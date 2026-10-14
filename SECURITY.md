@@ -48,7 +48,7 @@ In-scope threats:
 | Token signature | `HMAC-SHA256` over the base64url payload, JWT-like envelope `<payload>.<sig>` | `token/` |
 | Gateway request signature | `HMAC-SHA256` over `method\|decodedPath\|rawQuery\|clientIP\|unixTime\|sha256hex(body)` | `middleware/` |
 | Admin + JS key derivation | `HMAC-SHA256(secret, purpose \x00 scope)` KDF, purpose-namespaced | `middleware/`, `keys/` |
-| Randomness | `crypto/rand` (`RandomBytes`, `RandomID`) | `keys/` |
+| Randomness | `crypto/rand` (`RandomBytes`, `RandomID`) | `keys/`, `token/` |
 | JS encryption keys | 32-byte raw key material for WebCrypto `AES-GCM` (`raw` format) or HMAC sign keys | `server.go` `/api/keys/javascript` |
 
 Shepherd itself does not encrypt data at rest or in transit; it **supplies the

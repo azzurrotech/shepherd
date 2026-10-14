@@ -50,7 +50,6 @@ can be queried directly as well as through `claims.Block`.
   at an explicit unix time.
 - `func (s *Store) Cleanup()` — drops entries whose expiry has passed
   (`exp <= now`).
-- `func (s *Store) Len() int` — number of tracked entries (tests/debug only).
 
 ## Usage
 

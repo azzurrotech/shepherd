@@ -49,14 +49,10 @@ server stores nothing.
 
 - `func RandomBytes(n int) ([]byte, error)` — `n` cryptographically secure
   random bytes (`crypto/rand`).
-- `func RandomID() (string, error)` — 128-bit random identifier in lowercase
-  hex.
 - `func Derive(master []byte, purpose, scope string) []byte` — deterministic
   `HMAC-SHA256(master, purpose || 0x00 || scope)`.
 - `func JSDerivedAES(master []byte, scope string) (JSCryptoKey, error)` —
   deterministic AES-256-GCM key (`KDF: "HMAC-SHA256"`).
-- `func JSRandomAES(scope string) (JSCryptoKey, error)` — fresh random
-  AES-256-GCM key (`KDF: "random"`).
 - `func JSHMAC(master []byte, scope string) (JSCryptoKey, error)` —
   deterministic HMAC-SHA256 key (`Usage: "sign/verify"`, `IVLength: 0`).
 
@@ -104,8 +100,7 @@ go test -race ./keys/
 `keys_test.go` verifies that `Derive` is deterministic per `(purpose, scope)`
 and changes with scope or master secret, that `JSDerivedAES` yields stable
 base64 that decodes to 32 bytes with `AES-GCM`/`IVLength == 12`, that
-`JSRandomAES` differs per call, and that `JSHMAC` equals the expected
-`HMAC-SHA256(master, purpose\x00scope)`.
+`JSHMAC` equals the expected `HMAC-SHA256(master, purpose\x00scope)`.
 
 ## Design notes and invariants
 

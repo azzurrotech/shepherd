@@ -150,6 +150,17 @@ func (s *Shepherd) Gateway(opt GatewayOptions) http.Handler {
 			}
 		}
 
+		// 4b. Debounce: drop duplicate/replayed identical traffic instead of
+		//     forwarding it, so a client cannot amplify load by hammering the
+		//     same request. Applies when Config.Debounce is set.
+		if s.dbnc != nil {
+			release := s.applyDebounce(s.dbnc, w, r)
+			if release == nil {
+				return
+			}
+			defer release()
+		}
+
 		// 5. Query enhancement: shepherd injects claims-derived parameters
 		//    the backend needs, without overwriting caller-supplied ones.
 		if claims != nil {

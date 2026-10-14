@@ -11,7 +11,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -22,6 +24,7 @@ import (
 
 	"azzurrotech/shepherd/firewall"
 	"azzurrotech/shepherd/middleware"
+	"azzurrotech/shepherd/provider"
 	"azzurrotech/shepherd/token"
 )
 
@@ -39,6 +42,8 @@ type Options struct {
 	ConfigPath      string
 	RatePerMinute   float64
 	Burst           float64
+	Debounce        time.Duration
+	DebounceMax     int
 	DefaultAllow    bool
 	ClientIPHeader  string
 	EphemeralSecret bool
@@ -54,6 +59,19 @@ type fileConfig struct {
 		PerMinute float64 `json:"per_minute"`
 		Burst     float64 `json:"burst"`
 	} `json:"rate,omitempty"`
+	// Debounce pre-loads the duplicate/replay suppression policy.
+	Debounce *struct {
+		WindowMS    int `json:"window_ms"`
+		MaxInflight int `json:"max_inflight"`
+	} `json:"debounce,omitempty"`
+	// Regenerate configures credential-keyed token regeneration. Omitted or
+	// enabled:true keeps the least-privilege default profile (identity only).
+	Regenerate *struct {
+		Enabled *bool    `json:"enabled,omitempty"`
+		Scopes  []string `json:"scopes,omitempty"`
+		Roles   []string `json:"roles,omitempty"`
+		TTL     string   `json:"ttl,omitempty"`
+	} `json:"regenerate,omitempty"`
 	Upstreams []middleware.Upstream `json:"upstreams,omitempty"`
 }
 
@@ -86,6 +104,9 @@ func NewServer(opts Options) (*Server, error) {
 	defaultAllow := opts.DefaultAllow
 	ratePerMinute := opts.RatePerMinute
 	burst := opts.Burst
+	debounceWindow := opts.Debounce
+	debounceMax := opts.DebounceMax
+	regen := defaultRegenProfile()
 	if fcfg != nil {
 		if fcfg.Firewall != nil {
 			defaultAllow = fcfg.Firewall.DefaultAllow
@@ -93,6 +114,24 @@ func NewServer(opts Options) (*Server, error) {
 		if fcfg.Rate != nil {
 			ratePerMinute = fcfg.Rate.PerMinute
 			burst = fcfg.Rate.Burst
+		}
+		if fcfg.Debounce != nil {
+			debounceWindow = time.Duration(fcfg.Debounce.WindowMS) * time.Millisecond
+			if fcfg.Debounce.MaxInflight > 0 {
+				debounceMax = fcfg.Debounce.MaxInflight
+			}
+		}
+		if fcfg.Regenerate != nil {
+			regen.Enabled = fcfg.Regenerate.Enabled == nil || *fcfg.Regenerate.Enabled
+			regen.Scopes = fcfg.Regenerate.Scopes
+			regen.Roles = fcfg.Regenerate.Roles
+			if fcfg.Regenerate.TTL != "" {
+				d, err := time.ParseDuration(fcfg.Regenerate.TTL)
+				if err != nil {
+					return nil, fmt.Errorf("config regenerate.ttl: %w", err)
+				}
+				regen.TTL = d
+			}
 		}
 	}
 
@@ -104,6 +143,9 @@ func NewServer(opts Options) (*Server, error) {
 		Firewall:        fw,
 		LimitsPerMinute: ratePerMinute,
 		Burst:           burst,
+		Debounce:        debounceWindow,
+		DebounceMax:     debounceMax,
+		Regenerate:      regen,
 		ClientIPHeader:  opts.ClientIPHeader,
 	})
 	if err != nil {
@@ -145,6 +187,9 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/api/keys/block", s.handleIssueBlock)
 	mux.HandleFunc("/api/keys/magic", s.handleMagicLink)
 	mux.HandleFunc("/api/keys/javascript", s.handleJavascriptKey)
+	mux.HandleFunc("/api/keys/regenerate", s.handleRegenerate)
+	mux.HandleFunc("/api/provider/authenticate", s.handleProviderAuthenticate)
+	mux.HandleFunc("/api/track/", s.handleTrack)
 	mux.HandleFunc("/verify", s.handleVerify)
 	mux.HandleFunc("/api/token/verify", s.handleVerifyToken)
 
@@ -272,6 +317,9 @@ Standard library only — no database.</p>
 <tr><td>POST</td><td><code>/api/keys/magic</code></td><td>create a magic link (admin)</td></tr>
 <tr><td>GET</td><td><code>/verify?t=...</code></td><td>redeem a magic link</td></tr>
 <tr><td>GET</td><td><code>/api/keys/javascript?scope=&amp;usage=</code></td><td>encryption key for JS software (admin)</td></tr>
+<tr><td>POST</td><td><code>/api/keys/regenerate</code></td><td>regenerate a credential-keyed token (no identity stored)</td></tr>
+<tr><td>POST</td><td><code>/api/provider/authenticate</code></td><td>identity-free provider: token → principal (pod-compatible)</td></tr>
+<tr><td>GET</td><td><code>/api/track/{token}</code></td><td>resolve a token to the item/ownership it tracks</td></tr>
 <tr><td>GET</td><td><code>/api/token/verify</code></td><td>validate a presented capability token</td></tr>
 <tr><td>POST</td><td><code>/api/revoke</code></td><td>revoke a token (admin)</td></tr>
 <tr><td>POST</td><td><code>/api/revoke/block</code></td><td>revoke a key block (admin)</td></tr>
@@ -466,6 +514,176 @@ func (s *Server) handleJavascriptKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, k)
+}
+
+// handleRegenerate re-derives the capability bound to a fixed credential. The
+// derivation is deterministic and secret-keyed
+//
+//	HMAC-SHA256(master_secret, domain || username || password)
+//
+// so the same username/password always reproduce the same capability. Nothing
+// about the credential is stored: the username and password are KDF input for
+// the duration of the call only and are never echoed back. The issued token is
+// still identity-free (its subject is an opaque derived identifier), and it can
+// never carry a scope/role outside the deployment's regeneration profile.
+func (s *Server) handleRegenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Username string   `json:"username"`
+		Password string   `json:"password"`
+		Scopes   []string `json:"scopes,omitempty"`
+		Roles    []string `json:"roles,omitempty"`
+		TTL      string   `json:"ttl,omitempty"`
+		Audience string   `json:"audience,omitempty"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	var ttl time.Duration
+	if req.TTL != "" {
+		d, err := time.ParseDuration(req.TTL)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid ttl: " + err.Error()})
+			return
+		}
+		ttl = d
+	}
+	raw, claims, err := s.mw.Manager().Regenerate(token.RegenOptions{
+		Username: req.Username,
+		Password: req.Password,
+		Scopes:   req.Scopes,
+		Roles:    req.Roles,
+		TTL:      ttl,
+		Audience: req.Audience,
+	})
+	switch {
+	case errors.Is(err, token.ErrRegenDisabled):
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": "token regeneration is disabled for this deployment"})
+		return
+	case errors.Is(err, token.ErrCredentials):
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "username and password are required"})
+		return
+	case errors.Is(err, token.ErrWidenPrivilege):
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	case err != nil:
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token":       raw,
+		"claims":      claims,
+		"expires_in":  claims.ExpiresAt - claims.IssuedAt,
+		"regenerated": true,
+	})
+}
+
+// handleProviderAuthenticate is the HTTP face of the pod-compatible provider:
+// present a capability token (in the body, or as a bearer/X-Shepherd-Token
+// header) and receive the identity-free principal — subject, scopes, roles — or
+// a refusal (401 for a missing/invalid/revoked token, 429 when rate limited).
+// No identity is revealed or stored.
+func (s *Server) handleProviderAuthenticate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Token string `json:"token,omitempty"`
+	}
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+			return
+		}
+	}
+	if req.Token != "" {
+		// Present the body token as a normal bearer credential so the provider
+		// resolves it exactly as it would from the transport.
+		r2 := r.Clone(r.Context())
+		r2.Header = r.Header.Clone()
+		r2.Header.Set("Authorization", "Bearer "+req.Token)
+		r = r2
+	}
+	p, err := s.mw.Provider().Authenticate(r)
+	if err != nil {
+		status := http.StatusUnauthorized
+		if errors.Is(err, provider.ErrRateLimited) {
+			status = http.StatusTooManyRequests
+			w.Header().Set("Retry-After", "1")
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="shepherd"`)
+		writeJSON(w, status, map[string]any{"authenticated": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authenticated": true,
+		"subject":       p.Subject,
+		"scopes":        p.Scopes,
+		"roles":         p.Roles,
+		"principal":     p,
+	})
+}
+
+// handleTrack resolves a capability token to the item/ownership it tracks —
+// subject, scopes, roles, block and issuance window — without revealing
+// identity. When the token names an item (meta.item), the in-memory store
+// records item -> subject (never item -> username) and the recorded owner is
+// returned.
+func (s *Server) handleTrack(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	raw := strings.TrimPrefix(r.URL.Path, "/api/track/")
+	if raw == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "token required in path"})
+		return
+	}
+	if dec, err := url.PathUnescape(raw); err == nil {
+		raw = dec
+	}
+	o, err := s.mw.TrackToken(raw)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"tracked": false, "error": "unknown or invalid token"})
+		return
+	}
+	resp := map[string]any{
+		"tracked":    true,
+		"subject":    o.Subject,
+		"scopes":     o.Scopes,
+		"roles":      o.Roles,
+		"block":      o.Block,
+		"jti":        o.TokenID,
+		"issued_at":  o.IssuedAt,
+		"expires_at": o.ExpiresAt,
+		"item":       o.Item,
+	}
+	if o.Item != "" {
+		if err := s.mw.ClaimItem(o.Item, o.Subject); err != nil && !errors.Is(err, token.ErrItemOwned) {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		if owner, ok := s.mw.ItemOwner(o.Item); ok {
+			resp["owner"] = owner
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// defaultRegenProfile is the least-privilege default for credential-keyed
+// regeneration: enabled (so a deployment can use it out of the box) but
+// carrying no scopes or roles until the config file provisions a profile. This
+// keeps "can be disabled per-deployment" true while defaulting to the smallest
+// possible capability.
+func defaultRegenProfile() *token.RegenProfile {
+	return &token.RegenProfile{Enabled: true}
 }
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {

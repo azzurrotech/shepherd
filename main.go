@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"azzurrotech/shepherd/keys"
 	"azzurrotech/shepherd/middleware"
@@ -40,9 +41,11 @@ func run() error {
 		secret  = flag.String("secret", os.Getenv("SHEPHERD_SECRET"), "master signing secret, hex or raw (env SHEPHERD_SECRET)")
 		issuer  = flag.String("issuer", middleware.DefaultIssuer, "token issuer name")
 		aud     = flag.String("audience", "", "default token audience")
-		config  = flag.String("config", "", "optional JSON config file (firewall/rate/upstreams)")
+		config  = flag.String("config", "", "optional JSON config file (firewall/rate/debounce/upstreams)")
 		rate    = flag.Float64("rate", 120, "rate limit per minute per client (0 disables)")
 		burst   = flag.Float64("burst", 30, "rate limiter burst size")
+		dbnc    = flag.Duration("debounce", 250*time.Millisecond, "duplicate/replay suppression window for identical requests (0 = off)")
+		dbncMax = flag.Int("debounce-max", 4, "max in-flight identical requests before extra ones are dropped")
 		deny    = flag.Bool("default-deny", false, "firewall default to deny instead of allow")
 		trustIP = flag.String("trust-proxy-header", "", "trust this header for the real client IP (e.g. X-Forwarded-For) — only behind a proxy you control")
 		help    = flag.Bool("help", false, "show help")
@@ -74,6 +77,8 @@ func run() error {
 		ConfigPath:      *config,
 		RatePerMinute:   *rate,
 		Burst:           *burst,
+		Debounce:        *dbnc,
+		DebounceMax:     *dbncMax,
 		DefaultAllow:    !*deny,
 		ClientIPHeader:  *trustIP,
 		EphemeralSecret: ephemeral,
@@ -98,9 +103,13 @@ Server mode — a standalone Go HTTP server exposing shepherd's IAM surface:
                                are empty an ephemeral secret is generated)
   -issuer string               token issuer name
   -audience string             default capability audience
-  -config string               JSON config file (firewall rules/rate/upstreams)
+  -config string               JSON config file (firewall rules/rate/debounce/upstreams)
   -rate float                  rate limit per minute per client (default 120, 0 = off)
   -burst float                 rate limiter burst (default 30)
+  -debounce duration           duplicate/replay suppression window for identical
+                               requests (default 250ms, 0 = off)
+  -debounce-max int            max in-flight identical requests before extra ones
+                               are dropped (default 4)
   -default-deny                firewall denies by default
   -trust-proxy-header string   trust this header for the client IP
   -version                     show version

@@ -69,8 +69,6 @@ gateway all share those instances.
   admin token (hex of `HMAC-SHA256(secret, "shepherd:admin:v1" \x00 "admin")`).
 - `func (s *Shepherd) JSCryptoKey(scope, usage string) (keys.JSCryptoKey, error)`
   — `""`/`"encrypt"` → `keys.JSDerivedAES`, `"sign"` → `keys.JSHMAC`.
-- `func (s *Shepherd) RandomJSCryptoKey(scope string) (keys.JSCryptoKey, error)`
-  — fresh random AES key.
 
 ### Identity, tokens and context
 

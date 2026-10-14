@@ -2,14 +2,13 @@ package middleware
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"azzurrotech/shepherd/firewall"
 	"azzurrotech/shepherd/token"
@@ -433,7 +432,141 @@ func TestGatewayBodyTooLarge(t *testing.T) {
 	}
 }
 
-func sha256Hex(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+// --- new middleware additions: Debounce, Provider, TrackToken, Regenerate ---
+
+func TestDebounceWrapperDropsDuplicates(t *testing.T) {
+	s := newTest(t, Config{})
+	calls := 0
+	h := s.Debounce(500*time.Millisecond, 4)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	if rec := doReq(t, h, "GET", "/same", ""); rec.Code != http.StatusOK {
+		t.Fatalf("first request: got %d, want 200", rec.Code)
+	}
+	rec := doReq(t, h, "GET", "/same", "")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("duplicate request: got %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("X-Shepherd-Debounced") == "" {
+		t.Fatalf("debounced marker header missing")
+	}
+	if calls != 1 {
+		t.Fatalf("handler should run once, ran %d", calls)
+	}
+	// A different path is independent.
+	if rec := doReq(t, h, "GET", "/other", ""); rec.Code != http.StatusOK {
+		t.Fatalf("different path: got %d, want 200", rec.Code)
+	}
+}
+
+func TestDebounceWrapperDisabled(t *testing.T) {
+	s := newTest(t, Config{})
+	calls := 0
+	h := s.Debounce(0, 4)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	for i := 0; i < 3; i++ {
+		if rec := doReq(t, h, "GET", "/same", ""); rec.Code != http.StatusOK {
+			t.Fatalf("window 0 must be off; request %d got %d", i, rec.Code)
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 calls with debounce off, got %d", calls)
+	}
+}
+
+func TestGateDebouncesDuplicates(t *testing.T) {
+	s := newTest(t, Config{Debounce: 500 * time.Millisecond, DebounceMax: 4})
+	calls := 0
+	g := s.Gate(nil, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	tok, _, _ := s.Issue(token.IssueOptions{})
+	if rec := doReq(t, g, "GET", "/x", tok); rec.Code != http.StatusOK {
+		t.Fatalf("first request: got %d, want 200", rec.Code)
+	}
+	if rec := doReq(t, g, "GET", "/x", tok); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("duplicate request: got %d, want 429", rec.Code)
+	}
+	if calls != 1 {
+		t.Fatalf("handler should run once, ran %d", calls)
+	}
+}
+
+func TestProviderMiddleware(t *testing.T) {
+	s := newTest(t, Config{})
+	tok, _, err := s.Issue(token.IssueOptions{Subject: "p-1", Scopes: []string{"read:orders"}, Roles: []string{"member"}})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+tok)
+	p, err := s.Provider().Authenticate(r)
+	if err != nil {
+		t.Fatalf("Provider.Authenticate: %v", err)
+	}
+	if p.Subject != "p-1" || len(p.Scopes) != 1 || p.Scopes[0] != "read:orders" {
+		t.Fatalf("principal wrong: %+v", p)
+	}
+	// Missing token is refused.
+	if _, err := s.Provider().Authenticate(httptest.NewRequest("GET", "/", nil)); err == nil {
+		t.Fatalf("missing token should be refused")
+	}
+}
+
+func TestMiddlewareTrackAndRegenerate(t *testing.T) {
+	s := newTest(t, Config{Regenerate: &token.RegenProfile{
+		Enabled: true, Scopes: []string{"read:orders"}, Roles: []string{"member"},
+	}})
+	tok, claims, err := s.Issue(token.IssueOptions{
+		Subject: "own", Scopes: []string{"write:doc"}, Meta: map[string]string{"item": "it-1"},
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	o, err := s.TrackToken(tok)
+	if err != nil {
+		t.Fatalf("TrackToken: %v", err)
+	}
+	if o.Subject != "own" || o.Item != "it-1" || o.TokenID != claims.ID {
+		t.Fatalf("ownership wrong: %+v", o)
+	}
+	if err := s.ClaimItem(o.Item, o.Subject); err != nil {
+		t.Fatalf("ClaimItem: %v", err)
+	}
+	if owner, ok := s.ItemOwner("it-1"); !ok || owner != "own" {
+		t.Fatalf("owner lookup wrong: %q %v", owner, ok)
+	}
+	// Revoked tokens do not track.
+	s.RevokeToken(claims.ID, claims.ExpiresAt)
+	if _, err := s.TrackToken(tok); err == nil {
+		t.Fatalf("revoked token should not track")
+	}
+
+	// Regenerate is deterministic and identity-free.
+	raw1, c1, err := s.Regenerate("u", "p")
+	if err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+	_, c2, err := s.Regenerate("u", "p")
+	if err != nil {
+		t.Fatalf("Regenerate 2: %v", err)
+	}
+	if c1.Subject != c2.Subject || c1.Subject == "" {
+		t.Fatalf("regenerate subject not deterministic: %q %q", c1.Subject, c2.Subject)
+	}
+	if c1.Subject == "u" {
+		t.Fatalf("subject leaked the credential")
+	}
+	if _, err := s.Manager().Verify(raw1); err != nil {
+		t.Fatalf("regenerated token does not verify: %v", err)
+	}
+	// Disabled regeneration errors.
+	off := newTest(t, Config{})
+	if _, _, err := off.Regenerate("u", "p"); err == nil {
+		t.Fatalf("disabled regeneration should error")
+	}
 }

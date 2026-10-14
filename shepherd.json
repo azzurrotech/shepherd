@@ -30,6 +30,16 @@
     "per_minute": 120,
     "burst": 30
   },
+  "debounce": {
+    "window_ms": 250,
+    "max_inflight": 4
+  },
+  "regenerate": {
+    "enabled": true,
+    "scopes": ["read:orders"],
+    "roles": ["member"],
+    "ttl": "1h"
+  },
   "upstreams": [
     {
       "name": "orders",

@@ -36,8 +36,8 @@ Out of scope:
   concatenation ambiguity, and the purpose string namespaces uses.
 - **Purpose namespacing**: `JSDerivedAES` uses `PurposeEncrypt`; `JSHMAC` uses
   `PurposeSign`, so the same scope yields distinct keys per purpose.
-- **CSPRNG only**: `RandomBytes` uses `crypto/rand`; `RandomID` draws 16 bytes
-  from it and hex-encodes. `JSRandomAES` keys are fresh CSPRNG output.
+- **CSPRNG only**: `RandomBytes` uses `crypto/rand`; every derived key is a
+  deterministic KDF output, never ad-hoc randomness.
 - **Length validation**: `JSDerivedAES` returns `ErrKeyTooShort` if the derived
   material is under `AESKeyBytes`, rather than emitting a short key.
 - **Explicit parameters**: keys advertise `Format: "raw"` and the correct
@@ -51,8 +51,6 @@ Out of scope:
 - **A browser must still receive its key over the wire.** The package does not
   authenticate or encrypt that delivery; use TLS and an admin/authorization
   check (server mode requires the admin token for `/api/keys/javascript`).
-- **`JSRandomAES` keys are not reproducible.** If the returned key is lost
-  before use, it cannot be re-derived; the caller must persist or re-request it.
 - **No key rotation primitive.** Rotating the master secret changes every
   derived key at once and invalidates existing ciphertext unless re-wrapped by
   the application.

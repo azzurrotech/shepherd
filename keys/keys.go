@@ -17,7 +17,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"time"
 )
@@ -60,15 +59,6 @@ func RandomBytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-// RandomID returns a 128-bit random identifier encoded in lowercase hex.
-func RandomID() (string, error) {
-	b, err := RandomBytes(16)
-	if err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
 // Derive deterministically derives a key from the master secret for a purpose
 // and scope. The output is HMAC-SHA256(master, purpose + "\x00" + scope).
 func Derive(master []byte, purpose, scope string) []byte {
@@ -92,24 +82,6 @@ func JSDerivedAES(master []byte, scope string) (JSCryptoKey, error) {
 		Usage:       "encrypt/decrypt",
 		Key:         base64.StdEncoding.EncodeToString(raw[:AESKeyBytes]),
 		KDF:         "HMAC-SHA256",
-		Scope:       scope,
-		IVLength:    AESIVLength,
-		GeneratedAt: time.Now().UTC(),
-	}, nil
-}
-
-// JSRandomAES returns a fresh random AES-256-GCM key for WebCrypto.
-func JSRandomAES(scope string) (JSCryptoKey, error) {
-	raw, err := RandomBytes(AESKeyBytes)
-	if err != nil {
-		return JSCryptoKey{}, err
-	}
-	return JSCryptoKey{
-		Algorithm:   AESAlgorithm,
-		Format:      "raw",
-		Usage:       "encrypt/decrypt",
-		Key:         base64.StdEncoding.EncodeToString(raw),
-		KDF:         "random",
 		Scope:       scope,
 		IVLength:    AESIVLength,
 		GeneratedAt: time.Now().UTC(),

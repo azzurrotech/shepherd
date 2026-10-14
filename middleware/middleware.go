@@ -29,8 +29,10 @@ import (
 	"strings"
 	"time"
 
+	"azzurrotech/shepherd/debounce"
 	"azzurrotech/shepherd/firewall"
 	"azzurrotech/shepherd/keys"
+	"azzurrotech/shepherd/provider"
 	"azzurrotech/shepherd/ratelimit"
 	"azzurrotech/shepherd/revoke"
 	"azzurrotech/shepherd/token"
@@ -81,6 +83,18 @@ type Config struct {
 	// source of the real client IP. Only set this when shepherd sits behind
 	// a proxy you control that overwrites the header.
 	ClientIPHeader string
+
+	// Debounce enables duplicate/replay suppression in the Gateway (and via the
+	// Debounce wrapper): identical requests within this window, or beyond
+	// DebounceMax in flight, are dropped. Zero disables it.
+	Debounce time.Duration
+	// DebounceMax caps concurrent identical requests (default 4).
+	DebounceMax int
+
+	// Regenerate configures credential-keyed token regeneration
+	// (middleware.Regenerate / POST /api/keys/regenerate). A nil profile
+	// disables the feature.
+	Regenerate *token.RegenProfile
 }
 
 // Shepherd is a configured instance of the middleware.
@@ -89,6 +103,8 @@ type Shepherd struct {
 	f      *firewall.Firewall
 	lim    *ratelimit.Limiter
 	deny   *revoke.Store
+	owns   *token.OwnershipStore
+	dbnc   *debounce.Debouncer
 	ipHdr  string
 	issuer string
 	secret []byte
@@ -115,6 +131,7 @@ func New(cfg Config) (*Shepherd, error) {
 		tokens: mgr,
 		f:      cfg.Firewall,
 		deny:   cfg.Deny,
+		owns:   token.NewOwnershipStore(),
 		ipHdr:  cfg.ClientIPHeader,
 		issuer: issuer,
 		secret: secret,
@@ -129,6 +146,14 @@ func New(cfg Config) (*Shepherd, error) {
 		}
 		s.lim = ratelimit.New(cfg.LimitsPerMinute, burst)
 	}
+	if cfg.Debounce > 0 {
+		max := cfg.DebounceMax
+		if max < 1 {
+			max = 4
+		}
+		s.dbnc = debounce.New(cfg.Debounce, max)
+	}
+	mgr.WithRegenerate(cfg.Regenerate)
 	return s, nil
 }
 
@@ -203,9 +228,56 @@ func (s *Shepherd) JSCryptoKey(scope, usage string) (keys.JSCryptoKey, error) {
 	}
 }
 
-// RandomJSCryptoKey returns a fresh, random AES-GCM key for JavaScript use.
-func (s *Shepherd) RandomJSCryptoKey(scope string) (keys.JSCryptoKey, error) {
-	return keys.JSRandomAES(scope)
+// Provider returns the identity-free auth provider compatible with pod's
+// AuthOptions.Authenticate. It resolves a presented capability token to a
+// Principal (subject/scopes/roles), consulting the same deny store and rate
+// limiter as the rest of shepherd, so a pod host that plugs it in inherits
+// shepherd's RBAC and rate limiting and stores no identity anywhere.
+//
+// A refusal returns an error: Wrap answers 401 for a missing/invalid/revoked
+// token and 429 when over the rate limit.
+func (s *Shepherd) Provider() provider.Provider {
+	opts := []provider.Option{provider.WithDeny(s.deny)}
+	if s.lim != nil {
+		opts = append(opts, provider.WithLimiter(s.lim))
+	}
+	return provider.New(s.tokens, opts...)
+}
+
+// TrackToken resolves a raw capability token to the identity-free ownership it
+// tracks (subject, scopes, roles, block, issuance window). It returns an error
+// when the token is invalid or revoked. No username is ever involved: the
+// subject is the opaque identifier carried by the token.
+func (s *Shepherd) TrackToken(raw string) (token.Ownership, error) {
+	o, err := s.tokens.Track(raw)
+	if err != nil {
+		return token.Ownership{}, err
+	}
+	if s.deny.Denied(o.TokenID) || (o.Block != "" && s.deny.Denied(o.Block)) {
+		return token.Ownership{}, token.ErrInvalidToken
+	}
+	return o, nil
+}
+
+// ClaimItem records subject as the owner of item in the in-memory ownership
+// store (item -> subject, never item -> username). It refuses to steal an item
+// already owned by a different subject (token.ErrItemOwned).
+func (s *Shepherd) ClaimItem(item, subject string) error {
+	return s.owns.Claim(item, subject)
+}
+
+// ItemOwner returns the opaque subject that owns item, if any.
+func (s *Shepherd) ItemOwner(item string) (string, bool) {
+	return s.owns.Owner(item)
+}
+
+// Regenerate reproduces the capability bound to a fixed credential. It never
+// stores the username or password; the capability is re-derived with
+// HMAC-SHA256(master_secret, domain||username||password) and can never widen
+// beyond the configured regeneration profile. It returns token.ErrRegenDisabled
+// when regeneration is off for the deployment.
+func (s *Shepherd) Regenerate(username, password string) (string, token.Claims, error) {
+	return s.tokens.Regenerate(token.RegenOptions{Username: username, Password: password})
 }
 
 // AdminToken derives the deterministic admin capability used by the standalone
@@ -367,10 +439,13 @@ func (s *Shepherd) Authorize(scopes ...string) func(http.Handler) http.Handler {
 }
 
 // Gate composes the full protection chain for a protected handler:
-// firewall → rate limit → authenticate → authorize.
+// firewall → rate limit → debounce → authenticate → authorize.
 func (s *Shepherd) Gate(required []string, next http.Handler) http.Handler {
 	h := s.Firewall(next)
 	h = s.RateLimit(h)
+	if s.dbnc != nil {
+		h = s.Debounce(s.dbnc.Window(), s.dbnc.MaxInflight())(h)
+	}
 	h = s.Authorize(required...)(h)
 	return h
 }
