@@ -270,6 +270,33 @@ capabilities, with no user directory behind it:
 `POST /api/keys/block` returns many keys that each carry their own `sub` but a
 shared `blk`. One `POST /api/revoke/block {"block":"…"}` invalidates them all.
 
+### Shares (the `capability` package)
+
+Applications rarely need "a token with scopes"; they need "hand a colleague a
+revocable pointer to one named thing". `shepherd/capability` is that operation
+over the normal token manager:
+
+```go
+share, err := capability.Issue(mgr, capability.IssueOptions{
+    Target: capability.Target{Kind: "item", ID: "item-1"}, // the app's own nouns
+    TTL:    time.Hour,
+})
+target, claims, err := capability.Resolve(mgr, share.Token) // read side
+err = capability.RevokeRaw(mgr, shepherd, share.Token)      // cancel by value
+```
+
+- The share is a capability **record**, not an access-control decision: the kind
+  and id live in the token's `meta`, and the application decides what they mean.
+- `Issue` returns the token's `jti` (`Share.JTI`), so a caller that kept the
+  issue-time response can revoke with `Revoke(revoker, share)`.
+- `RevokeRaw` resolves a token string to its `jti` and expiry and adds it to
+  shepherd's deny list, so cancellation works from a value alone. Revocation is
+  the platform's normal in-memory deny entry: durable only for the life of the
+  process.
+- `Revoker` is the one method a share needs (`RevokeToken(jti, expiresAt)`);
+  `middleware.Shepherd` implements it, and so does any store that keeps a deny
+  list.
+
 ### Token tracking — ownership without identity
 
 A token is how shepherd tracks **ownership of an item** without ever learning
@@ -544,6 +571,9 @@ and covered by tests:
 - The `provider/` package (`Principal`, `Provider`, `FromCapability`, `Wrap`),
   the `debounce/` package, `POST /api/provider/authenticate`, `POST
   /api/keys/regenerate` and `GET /api/track/<token>` are all implemented.
+- The `capability/` package (`Issue`, `Resolve`, `Revoke`, `RevokeRaw`,
+  `Share.JTI`) turns the token manager into the revocable named-share operation
+  applications actually use.
 - Capability tokens (HMAC-SHA256, versioned claims, opaque `sub`/`jti`),
   scopes/roles authorization, block keys, magic links, revocation, the
   firewall, the per-IP/subject token-bucket rate limiter, the debouncer, the JS
