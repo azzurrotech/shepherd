@@ -733,10 +733,50 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleVerifyToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		s.verifyPresentedToken(w, r)
+	case http.MethodPost:
+		// JSON form: {"token":"…","magic":false}. A platform that fronts
+		// shepherd (atp) accepts this body and forwards it unchanged.
+		var req struct {
+			Token string `json:"token"`
+			Magic bool   `json:"magic"`
+		}
+		if err := readJSON(r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"valid": false, "error": err.Error()})
+			return
+		}
+		if req.Token == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"valid": false, "error": "missing token"})
+			return
+		}
+		var (
+			claims token.Claims
+			err    error
+		)
+		if req.Magic {
+			claims, err = s.mw.VerifyMagicToken(req.Token)
+		} else {
+			claims, err = s.mw.Manager().Verify(req.Token)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"valid": false, "error": err.Error()})
+			return
+		}
+		if s.mw.IsDenied(claims.ID) || (claims.Block != "" && s.mw.IsDenied(claims.Block)) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"valid": false, "error": "token revoked"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "claims": claims})
+	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
-		return
 	}
+}
+
+// verifyPresentedToken validates the capability carried by the request
+// (bearer header or cookie) and answers with its claims.
+func (s *Server) verifyPresentedToken(w http.ResponseWriter, r *http.Request) {
 	raw := s.mw.TokenFromRequest(r)
 	if raw == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"valid": false, "error": "missing token"})
@@ -765,10 +805,23 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Token string `json:"token"`
+		Token     string `json:"token"`
+		JTI       string `json:"jti"`
+		ExpiresAt int64  `json:"expires_at"`
 	}
-	if err := readJSON(r, &req); err != nil || req.Token == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "token required"})
+	if err := readJSON(r, &req); err != nil || (req.Token == "" && req.JTI == "") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "token or jti required"})
+		return
+	}
+	if req.Token == "" {
+		// A platform that already verified the token may revoke by id. The
+		// expiry is only used to prune the deny list, so default it to a day.
+		exp := req.ExpiresAt
+		if exp <= 0 {
+			exp = time.Now().Add(24 * time.Hour).Unix()
+		}
+		s.mw.RevokeToken(req.JTI, exp)
+		writeJSON(w, http.StatusOK, map[string]any{"revoked": req.JTI})
 		return
 	}
 	claims, err := s.mw.Manager().Verify(req.Token)
@@ -833,6 +886,31 @@ func (s *Server) handleFirewallRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+	case http.MethodDelete:
+		// DELETE /api/firewall/rules?id=… (query) or {"id":"…"} (body).
+		if !s.requireAdmin(w, r) {
+			return
+		}
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			var body struct {
+				ID string `json:"id"`
+			}
+			if err := readJSON(r, &body); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id required"})
+				return
+			}
+			id = body.ID
+		}
+		if id == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id required"})
+			return
+		}
+		if !s.fw.Remove(id) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "rule not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"removed": id})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 	}
@@ -870,8 +948,9 @@ func (s *Server) handleRateStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	key := r.URL.Query().Get("key")
 	if key == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "key query param required (e.g. ip:1.2.3.4)"})
-		return
+		// A platform fronting shepherd can ask for "this caller's" snapshot
+		// without knowing the limiter's keying scheme.
+		key = "ip:" + s.mw.ClientIP(r)
 	}
 	st, ok := s.mw.RateLimitStatus(key)
 	if !ok {
